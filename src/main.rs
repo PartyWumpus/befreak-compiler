@@ -284,6 +284,7 @@ fn parse_operator(
                 Direction::North => Directions::Continue(Direction::East),
                 Direction::South => Directions::Continue(Direction::East),
                 Direction::East => Directions::ContinueInversed(Direction::West),
+                // north if one, south if zero
                 Direction::West => Directions::Branch(Direction::North, Direction::South),
             },
         ),
@@ -355,7 +356,7 @@ fn parse_expression(
                 continue;
             }
             Directions::Halt => {
-                println!("\nhalt: {expression:?}\n");
+                println!("\nident:{initial_identifier:?}\nbranch: {expression:?}\n");
                 data.tree.insert(
                     initial_identifier,
                     Expression {
@@ -366,25 +367,35 @@ fn parse_expression(
                 return;
             }
             Directions::Branch(dir1, dir2) => {
-                println!("\nbranch: {expression:?}\n");
-                data.tree.insert(
-                    initial_identifier,
-                    Expression {
-                        arr: expression,
-                        next: Branches::Two(
-                            ExpressionIdentifier {
-                                position: position.step(dir1),
-                                direction: dir1,
-                                inverse_mode,
-                            },
-                            ExpressionIdentifier {
-                                position: position.step(dir2),
-                                direction: dir2,
-                                inverse_mode,
-                            },
-                        ),
-                    },
-                );
+                println!("\nident:{initial_identifier:?}\nbranch: {expression:?}\n");
+                let one = ExpressionIdentifier {
+                    position: position.step(dir1),
+                    direction: dir1,
+                    inverse_mode,
+                };
+                let two = ExpressionIdentifier {
+                    position: position.step(dir2),
+                    direction: dir2,
+                    inverse_mode,
+                };
+                if !inverse_mode {
+                    data.tree.insert(
+                        initial_identifier,
+                        Expression {
+                            arr: expression,
+                            next: Branches::Two(one, two),
+                        },
+                    );
+                } else {
+                    data.tree.insert(
+                        initial_identifier,
+                        Expression {
+                            arr: expression,
+                            next: Branches::Two(two, one),
+                        },
+                    );
+                }
+
                 if !data.tree.contains_key(&ExpressionIdentifier::new(
                     inverse_mode,
                     position.step(dir1),
@@ -426,17 +437,17 @@ fn get_start_pos(code: &Array2D<char>) -> Option<Position> {
 
 fn string_to_i32_arr(str: &str) -> String {
     let mut res = str.chars().fold(String::new(), |mut acc, char| {
-                    write!(acc, "{}", format!("i32 {}, ", char as u64)).unwrap();
-                    acc
-                });
+        write!(acc, "{}", format!("i32 {}, ", char as u64)).unwrap();
+        acc
+    });
     res.pop();
     res.pop();
     res
 }
 
 fn string_llvm_ir(str: &str, string_name: &str) -> String {
-format!(
-                "
+    format!(
+        "
     ; STRING CODE BEGIN
     call void @increment_stack(i32 1)
 
@@ -449,11 +460,10 @@ format!(
     call void @increment_stack(i32 {length_minus_one}) ; len - 1
     ; STRING CODE END
 ",
-                var=string_name,
-                length = str.len(),
-                length_minus_one = str.len() - 1
-            )
-
+        var = string_name,
+        length = str.len(),
+        length_minus_one = str.len() - 1
+    )
 }
 
 fn operator_to_llvm_ir(str: &mut String, epilogue: &mut String, operator_data: Operator) {
@@ -465,115 +475,194 @@ fn operator_to_llvm_ir(str: &mut String, epilogue: &mut String, operator_data: O
 
     let tmp;
 
-    str.push_str(match operator {
-        OperatorSymbol::Blank => "",
+    let addition = match (inverse, operator) {
+        (_, OperatorSymbol::Blank) => "",
 
         // data
-        OperatorSymbol::Number(num) => {
-            tmp = format!("\n    call void @bf_Number(i32 {integer})", integer = num);
+        (_, OperatorSymbol::Number(num)) => {
+            tmp = format!("call void @bf_Number(i32 {integer})", integer = num);
             &tmp
         }
-        //OperatorSymbol::Number(num) => todo!(),
-        OperatorSymbol::String(str) => {
+        (false, OperatorSymbol::String(str)) => {
             let string_name = "wasd";
             // add string data to prologue of function
             write!(
                 epilogue,
                 "\n@{var} = private unnamed_addr constant [{length} x i32] [{arr}], align 4\n",
-                var= string_name,
+                var = string_name,
                 length = str.len(),
                 arr = string_to_i32_arr(&str)
-            ).unwrap();
+            )
+            .unwrap();
 
             // insert the string code inline
             tmp = string_llvm_ir(&str, string_name);
             &tmp
         } // stuff between speech marks
+        (true, OperatorSymbol::String(_)) => todo!(),
 
         // stack
-        OperatorSymbol::PushZero => "\n    call void @bf_PushZero()",
-        OperatorSymbol::PopZero => "\n    call void @bf_PopZero()",
-        OperatorSymbol::PopMainToControl => "\n    call void @bf_PopMainToControl()",
-        OperatorSymbol::PopControlToMain => "\n    call void @bf_PopControlToMain()",
-        OperatorSymbol::SwapStacks => "\n    call void @bf_SwapStacks()",
+        (false, OperatorSymbol::PushZero) => "call void @bf_PushZero()",
+        (true, OperatorSymbol::PushZero) => "call void @bf_PopZero()",
+
+        (false, OperatorSymbol::PopZero) => "call void @bf_PopZero()",
+        (true, OperatorSymbol::PopZero) => "call void @bf_PushZero()",
+
+        (false, OperatorSymbol::PopMainToControl) => "call void @bf_PopMainToControl()",
+        (true, OperatorSymbol::PopMainToControl) => "call void @bf_PopControlToMain()",
+
+        (false, OperatorSymbol::PopControlToMain) => "call void @bf_PopControlToMain()",
+        (true, OperatorSymbol::PopControlToMain) => "call void @bf_PopMainToControl()",
+
+        (_, OperatorSymbol::SwapStacks) => "call void @bf_SwapStacks()",
 
         // i/o
-        OperatorSymbol::Write => "\n    call void @bf_Write()",
-        OperatorSymbol::Read => "\n    call void @bf_Read()",
+        (false, OperatorSymbol::Write) => "call void @bf_Write()",
+        (true, OperatorSymbol::Write) => "call void @print_int(i32 40400)",
+
+        (false, OperatorSymbol::Read) => "call void @bf_Read()",
+        (true, OperatorSymbol::Read) => "call void @print_int(i32 40500)",
+
         // number
-        //
-        OperatorSymbol::Increment => "\n    call void @bf_Increment()",
-        OperatorSymbol::Decrement => "\n    call void @bf_Decrement()",
-        OperatorSymbol::Add => "\n    call void @bf_Add()",
-        OperatorSymbol::Subtract => "\n    call void @bf_Subtract()",
-        OperatorSymbol::Divide => "\n    call void @bf_Divide()",
-        OperatorSymbol::Multiply => "\n    call void @bf_Multiply()",
+        (false, OperatorSymbol::Increment) => "call void @bf_Increment()",
+        (true, OperatorSymbol::Increment) => "call void @bf_Decrement()",
+
+        (false, OperatorSymbol::Decrement) => "call void @bf_Decrement()",
+        (true, OperatorSymbol::Decrement) => "call void @bf_Increment()",
+
+        (false, OperatorSymbol::Add) => "call void @bf_Add()",
+        (true, OperatorSymbol::Add) => "call void @bf_Subtract()",
+
+        (false, OperatorSymbol::Subtract) => "call void @bf_Subtract()",
+        (true, OperatorSymbol::Subtract) => "call void @bf_Add()",
+
+        (false, OperatorSymbol::Divide) => "call void @bf_Divide()",
+        (true, OperatorSymbol::Divide) => "call void @bf_Multiply()",
+
+        (false, OperatorSymbol::Multiply) => "call void @bf_Multiply()",
+        (true, OperatorSymbol::Multiply) => "call void @bf_Divide()",
 
         // bitwise
-        OperatorSymbol::Not => "\n    call void @bf_Not()",
-        OperatorSymbol::And => "\n    call void @bf_And()",
-        OperatorSymbol::Or => "\n    call void @bf_Or()",
-        OperatorSymbol::Xor => "\n    call void @bf_Xor()",
-        OperatorSymbol::RotateLeft => "\n    call void @bf_RotateLeft()",
-        OperatorSymbol::RotateRight => "\n    call void @bf_RotateRight()",
+        (_, OperatorSymbol::Not) => "call void @bf_Not()",
+
+        (_, OperatorSymbol::And) => "call void @bf_And()",
+
+        (_, OperatorSymbol::Or) => "call void @bf_Or()",
+
+        (_, OperatorSymbol::Xor) => "call void @bf_Xor()",
+
+        (false, OperatorSymbol::RotateLeft) => "call void @bf_RotateLeft()",
+        (true, OperatorSymbol::RotateLeft) => "call void @bf_RotateRight()",
+
+        (false, OperatorSymbol::RotateRight) => "call void @bf_RotateRight()",
+        (true, OperatorSymbol::RotateRight) => "call void @bf_RotateLeft()",
 
         // comparisons
-        OperatorSymbol::ToggleControl => "\n    call void @bf_ToggleControl()",
-        OperatorSymbol::EqualityCheck => "\n    call void @bf_EqualityCheck()",
-        OperatorSymbol::LessThanCheck => "\n    call void @bf_LessThanCheck()",
-        OperatorSymbol::GreaterThanCheck => "\n    call void @bf_GreaterThanCheck()",
+        (_, OperatorSymbol::ToggleControl) => "call void @bf_ToggleControl()",
+
+        (_, OperatorSymbol::EqualityCheck) => "call void @bf_EqualityCheck()",
+
+        (_, OperatorSymbol::LessThanCheck) => "call void @bf_LessThanCheck()",
+
+        (_, OperatorSymbol::GreaterThanCheck) => "call void @bf_GreaterThanCheck()",
 
         // stack movement
-        OperatorSymbol::SwapTop => "\n    call void @bf_SwapTop()",
-        OperatorSymbol::Dig => "\n    call void @bf_Dig()",
-        OperatorSymbol::Bury => "\n    call void @bf_Bury()",
-        OperatorSymbol::Flip => "\n    call void @bf_Flip()",
-        OperatorSymbol::SwapLower => "\n    call void @bf_SwapLower()",
-        OperatorSymbol::Over => "\n    call void @bf_Over()",
-        OperatorSymbol::Under => "\n    call void @bf_Under()",
+        (_, OperatorSymbol::SwapTop) => "call void @bf_SwapTop()",
+
+        (false, OperatorSymbol::Dig) => "call void @bf_Dig()",
+        (true, OperatorSymbol::Dig) => "call void @bf_Bury()",
+
+        (false, OperatorSymbol::Bury) => "call void @bf_Bury()",
+        (true, OperatorSymbol::Bury) => "call void @bf_Dig()",
+
+        (_, OperatorSymbol::Flip) => "call void @bf_Flip()",
+
+        (_, OperatorSymbol::SwapLower) => "call void @bf_SwapLower()",
+
+        (false, OperatorSymbol::Over) => "call void @bf_Over()",
+        (true, OperatorSymbol::Over) => "call void @bf_Under()",
+
+        (false, OperatorSymbol::Under) => "call void @bf_Under()",
+        (true, OperatorSymbol::Under) => "call void @bf_Over()",
 
         // misc
-        OperatorSymbol::Duplicate => "\n    call void @bf_Duplicate()",
-        OperatorSymbol::Unduplicate => "\n    call void @bf_Unduplicate()",
-        OperatorSymbol::InverseMode => "\n    call void @bf_InverseMode()",
-        OperatorSymbol::Halt => "", // Maybe make this output some info, like the stack
+        (false, OperatorSymbol::Duplicate) => "call void @bf_Duplicate()",
+        (true, OperatorSymbol::Duplicate) => "call void @bf_Unduplicate()",
+
+        (false, OperatorSymbol::Unduplicate) => "call void @bf_Unduplicate()",
+        (true, OperatorSymbol::Unduplicate) => "call void @bf_Duplicate()",
+
+        (_, OperatorSymbol::InverseMode) => "", // handled at parse time
+        (_, OperatorSymbol::Halt) => "",        // Maybe make this output some info, like the stack
 
         // direction changing
-        // determined at parse time
-        OperatorSymbol::Mirror1 => "",
-        OperatorSymbol::Mirror2 => "",
-        // TODO:
-        OperatorSymbol::EastBranch => match direction {
-            Direction::North => "\n    call void @push_control_stack(i32 0)",
-            Direction::South => "\n    call void @push_control_stack(i32 1)",
-            Direction::East => "\n    call void @toggle_control_stack()",
+        (_, OperatorSymbol::Mirror1) => "", // handled at parse time
+        (_, OperatorSymbol::Mirror2) => "", // handled at parse time
+        (false, OperatorSymbol::EastBranch) => match direction {
+            Direction::North => "call void @push_control_stack(i32 1)",
+            Direction::South => "call void @push_control_stack(i32 0)",
+            Direction::East => "call void @toggle_control_stack()",
             Direction::West => "", // dealt with elsewhere
         },
-        OperatorSymbol::WestBranch => match direction {
-            Direction::North => "\n    call void @push_control_stack(i32 0)",
-            Direction::South => "\n    call void @push_control_stack(i32 1)",
+        (true, OperatorSymbol::EastBranch) => match direction {
+            Direction::North => "call void @push_control_stack(i32 0)",
+            Direction::South => "call void @push_control_stack(i32 1)",
+            Direction::East => "call void @toggle_control_stack()",
+            Direction::West => "", // dealt with elsewhere
+        },
+
+        (false, OperatorSymbol::WestBranch) => match direction {
+            Direction::North => "call void @push_control_stack(i32 0)",
+            Direction::South => "call void @push_control_stack(i32 1)",
             Direction::East => "", // dealt with elsewhere
-            Direction::West => "\n    call void @toggle_control_stack()",
+            Direction::West => "call void @toggle_control_stack()",
         },
-        OperatorSymbol::SouthBranch => match direction {
+        (true, OperatorSymbol::WestBranch) => match direction {
+            Direction::North => "call void @push_control_stack(i32 1)",
+            Direction::South => "call void @push_control_stack(i32 0)",
+            Direction::East => "", // dealt with elsewhere
+            Direction::West => "call void @toggle_control_stack()",
+        },
+
+        (false, OperatorSymbol::SouthBranch) => match direction {
             Direction::North => "", // dealt with elsewhere
-            Direction::South => "\n    call void @toggle_control_stack()",
-            Direction::East => "\n    call void @push_control_stack(i32 1)",
-            Direction::West => "\n    call void @push_control_stack(i32 0)",
+            Direction::South => "call void @toggle_control_stack()",
+            Direction::East => "call void @push_control_stack(i32 1)",
+            Direction::West => "call void @push_control_stack(i32 0)",
         },
-        OperatorSymbol::NorthBranch => match direction {
-            Direction::North => "\n    call void @toggle_control_stack()",
+        (true, OperatorSymbol::SouthBranch) => match direction {
+            Direction::North => "", // dealt with elsewhere
+            Direction::South => "call void @toggle_control_stack()",
+            Direction::East => "call void @push_control_stack(i32 0)",
+            Direction::West => "call void @push_control_stack(i32 1)",
+        },
+
+        (false, OperatorSymbol::NorthBranch) => match direction {
+            Direction::North => "call void @toggle_control_stack()",
             Direction::South => "", // dealt with elsewhere
-            Direction::East => "\n    call void @push_control_stack(i32 0)",
-            Direction::West => "\n    call void @push_control_stack(i32 1)",
+            Direction::East => "call void @push_control_stack(i32 0)",
+            Direction::West => "call void @push_control_stack(i32 1)",
         },
-    })
+        (true, OperatorSymbol::NorthBranch) => match direction {
+            Direction::North => "call void @toggle_control_stack()",
+            Direction::South => "", // dealt with elsewhere
+            Direction::East => "call void @push_control_stack(i32 1)",
+            Direction::West => "call void @push_control_stack(i32 0)",
+        },
+    };
+    if addition != "" {
+        str.push_str("\n    ");
+        str.push_str(addition);
+    }
 }
 
 const PRELUDE: &str = r#"
 ;; globals
 @int_str = private unnamed_addr constant [4 x i8] c"%d\0A\00", align 1
-@char_str = private unnamed_addr constant [3 x i8] c"%c\00", align 1
+@char_str = private unnamed_addr constant [5 x i8] c"-%c-\00", align 1
+@stack_str = private unnamed_addr constant [8 x i8] c"stack:\0A\00", align 1
+@newline_str = private unnamed_addr constant [3 x i8] c"\0A\0A\00", align 1
+@unimplemented_str = private unnamed_addr constant [15 x i8] c"unimplemented!\00", align 1
 
 declare dso_local i32 @printf(i8*, ...) #1
 declare dso_local void @exit(i32) #2
@@ -595,14 +684,17 @@ define void @print_int(i32 %val) {
 }
 
 define void @print_stack() {
-  %arr = alloca [40 x i32], align 16
-  %i = alloca i32, align 4
-  store i32 0, i32* %i, align 4
-  br label %for.cond
+    call i32 (i8*, ...) @printf(i8* getelementptr inbounds ([8 x i8], [8 x i8]* @stack_str, i64 0, i64 0))
+    %arr = alloca [40 x i32], align 16
+    %i = alloca i32, align 4
+    store i32 0, i32* %i, align 4
+    %stack_offset = load i32, i32* @primary_offset
+    %stack_size = add i32 %stack_offset, 1
+    br label %for.cond
 
 for.cond:
-  %1 = load i32, i32* %i, align 4
-  %cmp = icmp slt i32 %1, 40 ; 40 is length of stack
+  %x = load i32, i32* %i, align 4
+  %cmp = icmp slt i32 %x, %stack_size ; 40 is length of stack
   br i1 %cmp, label %for.body, label %for.end
 
 for.body:
@@ -619,7 +711,20 @@ for.body:
     br label %for.cond
 
 for.end:
+    call i32 (i8*, ...) @printf(i8* getelementptr inbounds ([3 x i8], [3 x i8]* @newline_str, i64 0, i64 0))
     ret void
+}
+
+define void @debug(i32 %x) {
+    call void @print_stack()
+    call void @print_int(i32 %x)
+    ret void
+}
+
+define void @unimplemented() {
+    call i32 (i8*, ...) @printf(i8* getelementptr inbounds ([15 x i8], [15 x i8]* @unimplemented_str, i64 0, i64 0))
+    call void @exit(i32 1)
+    unreachable
 }
 
 define void @increment_stack(i32 %amount) {
@@ -661,7 +766,6 @@ define void @push_control_stack(i32 %val) {
 }
 
 define i32 @peek_stack(i32 %depth) {
-    ; get val from the stack at pointer
     %offset.0 = load i32, i32* @primary_offset
     %offset.1 = sub i32 %offset.0, %depth
     %ptr = getelementptr [40 x i32], i32* @primary_stack, i32 0, i32 %offset.1
@@ -718,40 +822,42 @@ not_zero:
 ;; specific befreak operator impls
 
 define void @bf_Number(i32 %num) {
+    call void @debug(i32 13)
     %val.0 = call i32 @pop_stack()
     %val.1 = xor i32 %val.0, %num
     call void @push_stack(i32 %val.1)
     ret void
 }
 
-define void @bf_String() {
-ret void
-}
-
 ; simple stack
 define void @bf_PushZero() {
+    call void @debug(i32 14)
     call void @push_stack(i32 0)
     ret void
 }
 
 define void @bf_PopZero() {
+    call void @debug(i32 15)
     call void @pop_stack()
     ret void
 }
 
 define void @bf_PopMainToControl() {
+    call void @debug(i32 16)
     %1 = call i32 @pop_stack()
     call void @push_control_stack(i32 %1)
     ret void
 }
 
 define void @bf_PopControlToMain() {
+    call void @debug(i32 17)
     %1 = call i32 @pop_control_stack()
     call void @push_stack(i32 %1)
     ret void
 }
 
 define void @bf_SwapStacks() {
+    call void @debug(i32 18)
     %1 = call i32 @pop_stack()
     %2 = call i32 @pop_control_stack()
     call void @push_stack(i32 %2)
@@ -761,76 +867,123 @@ define void @bf_SwapStacks() {
 
 ; i/o
 define void @bf_Write() {
+    call void @debug(i32 19)
     %1 = call i32 @pop_stack()
     call i32 (i8*, ...) @printf(i8* getelementptr inbounds ([3 x i8], [3 x i8]* @char_str, i64 0, i64 0), i32 %1)
     ret void
 }
 define void @bf_Read() {
-ret void
+    call void @debug(i32 20)
+    call void @unimplemented()
+    ret void
 }
 
 ; number
 define void @bf_Increment() {
+    call void @debug(i32 21)
     %1 = call i32 @pop_stack()
     %2 = add i32 %1, 1
     call void @push_stack(i32 %2)
     ret void
 }
 define void @bf_Decrement() {
+    call void @debug(i32 22)
     %1 = call i32 @pop_stack()
     %2 = sub i32 %1, 1
     call void @push_stack(i32 %2)
     ret void
 }
 define void @bf_Add() {
-    call void @print_int(i32 22)
+    call void @debug(i32 23)
+    %1 = call i32 @pop_stack()
+    %2 = call i32 @pop_stack()
+    %sum = add i32 %2, %1
+    call void @push_stack(i32 %sum)
+    call void @push_stack(i32 %1)
     ret void
 }
 define void @bf_Subtract() {
-    call void @print_int(i32 23)
+    call void @debug(i32 23)
+    %1 = call i32 @pop_stack()
+    %2 = call i32 @pop_stack()
+    %sum = sub i32 %2, %1
+    call void @push_stack(i32 %sum)
+    call void @push_stack(i32 %1)
     ret void
 }
 define void @bf_Divide() {
-    call void @print_int(i32 24)
+    call void @debug(i32 24)
+    %x = call i32 @pop_stack()
+    %y = call i32 @pop_stack()
+    %div = sdiv i32 %y, %x
+    %rem = srem i32 %y, %x
+    call void @push_stack(i32 %div)
+    call void @push_stack(i32 %rem)
+    call void @push_stack(i32 %x)
     ret void
 }
 define void @bf_Multiply() {
-    call void @print_int(i32 25)
+    call void @debug(i32 25)
+    %x = call i32 @pop_stack()
+    %rem = call i32 @pop_stack()
+    %div = call i32 @pop_stack()
+    %y.0 = mul i32 %x, %div
+    %y.1 = add i32 %y.0, %rem
+    call void @push_stack(i32 %y.1)
+    call void @push_stack(i32 %x)
     ret void
 }
 
 ; bitwise
 define void @bf_Not() {
-    call void @print_int(i32 26)
+    call void @debug(i32 26)
+    %1 = call i32 @pop_stack()
+    %2 = xor i32 %1, -1 ; the docs say this is okay :)
+    call void @push_stack(i32 %2)
     ret void
 }
+
 define void @bf_And() {
-    call void @print_int(i32 27)
+    call void @debug(i32 27)
+    call void @unimplemented()
     ret void
 }
+
 define void @bf_Or() {
-    call void @print_int(i32 28)
+    call void @debug(i32 28)
+    call void @unimplemented()
     ret void
 }
+
 define void @bf_Xor() {
-    call void @print_int(i32 29)
+    call void @debug(i32 29)
+    call void @unimplemented()
     ret void
 }
+
 define void @bf_RotateLeft() {
-    call void @print_int(i32 30)
+    call void @debug(i32 30)
+    call void @unimplemented()
     ret void
 }
+
 define void @bf_RotateRight() {
-    call void @print_int(i32 31)
+    call void @debug(i32 31)
+    call void @unimplemented()
     ret void
 }
 
 ; comparisons
 define void @bf_ToggleControl() {
-    call void @print_int(i32 32)
+    call void @debug(i32 32)
+    call void @unimplemented()
     ret void
 }
+
 define void @bf_EqualityCheck() {
+    call void @debug(i32 33)
+    %x = call i32 @pop_control_stack()
+    call void @push_control_stack(i32 %x)
     %1 = call i32 @peek_stack(i32 0)
     %2 = call i32 @peek_stack(i32 1)
     %cond = icmp eq i32 %1, %2
@@ -841,17 +994,22 @@ equal:
 not_equal:
     ret void
 }
+
 define void @bf_LessThanCheck() {
-    call void @print_int(i32 34)
+    call void @debug(i32 34)
+    call void @unimplemented()
     ret void
 }
+
 define void @bf_GreaterThanCheck() {
-    call void @print_int(i32 35)
+    call void @debug(i32 35)
+    call void @unimplemented()
     ret void
 }
 
 ; complex stack
 define void @bf_SwapTop() {
+    call void @debug(i32 36)
     %1 = call i32 @pop_stack()
     %2 = call i32 @pop_stack()
     call void @push_stack(i32 %1)
@@ -859,44 +1017,57 @@ define void @bf_SwapTop() {
     ret void
 }
 define void @bf_Dig() {
-    call void @print_int(i32 37)
+    call void @debug(i32 37)
+    call void @unimplemented()
     ret void
 }
 define void @bf_Bury() {
-    call void @print_int(i32 38)
+    call void @debug(i32 38)
+    call void @unimplemented()
     ret void
 }
 define void @bf_Flip() {
-    call void @print_int(i32 39)
-ret void
+    call void @debug(i32 39)
+    call void @unimplemented()
+    ret void
 }
 define void @bf_SwapLower() {
-    call void @print_int(i32 40)
+    call void @debug(i32 40)
+    %x = call i32 @pop_stack();
+    %y = call i32 @pop_stack();
+    %z = call i32 @pop_stack();
+    call void @push_stack(i32 %y)
+    call void @push_stack(i32 %z)
+    call void @push_stack(i32 %x)
     ret void
 }
 define void @bf_Over() {
-    call void @print_int(i32 41)
+    call void @debug(i32 41)
+    call void @unimplemented()
     ret void
 }
 define void @bf_Under() {
-    call void @print_int(i32 42)
+    call void @debug(i32 42)
+    call void @unimplemented()
     ret void
 }
 
 ; misc
 define void @bf_Duplicate() {
-    call void @print_int(i32 43)
+    call void @debug(i32 43)
+    ; assumes top two are same
+    %x = call i32 @pop_stack()
+    call void @push_stack(i32 %x)
+    call void @push_stack(i32 %x)
     ret void
 }
 define void @bf_Unduplicate() {
-    call void @print_int(i32 44)
-    ret void
-}
-define void @bf_InverseMode() {
-    call void @print_int(i32 45)
+    call void @debug(i32 44)
+    call void @pop_stack()
     ret void
 }
 define void @bf_Halt() {
+    call void @debug(i32 45)
     call void @exit(i32 0)
     unreachable
 }
@@ -940,17 +1111,17 @@ fn compile(data: ExpressionTree) {
                 llvm_ir.push_str(
                     "\n
     %cond = call i1 @pop_control_stack_i1()
-    br i1 %cond, label %branch_true, label %branch_false\n",
+    br i1 %cond, label %branch_1, label %branch_0\n",
                 );
                 write!(
                     llvm_ir,
-                    "branch_true:\n    call void {}()\n    ret void\n",
+                    "branch_1:\n    call void {}()\n    ret void\n",
                     identifier_to_string(id1)
                 )
                 .unwrap();
                 write!(
                     llvm_ir,
-                    "branch_false:\n    call void {}()\n    ret void",
+                    "branch_0:\n    call void {}()\n    ret void",
                     identifier_to_string(id2)
                 )
                 .unwrap();
@@ -975,10 +1146,6 @@ define void @main() {{
     .unwrap();
     println!("{llvm_ir}");
 }
-
-// NOTES:
-// blank can be ignored completely
-// all branches that are not the final operator can be ignored
 
 fn read_string(data: &str) -> Array2D<char> {
     let mut lines = vec![];
@@ -1005,6 +1172,9 @@ fn parse_code(code: &Array2D<char>) -> ExpressionTree {
     data
 }
 
+// TODO:
+// fix num/string going over edges
+
 fn main() {
     let data = r#"
     /1)@(1\         
@@ -1022,11 +1192,45 @@ fn main() {
 %   )      (       w
 \01(^      ^)01*01(/"#;
     let data2 = r#"@(())"#;
-    let data = r#"
+    let data2 = r#"
 /"Hello world!"01\
 \(13v     'wsv)@(/
     \(=13=13)/    
 "#;
+    let data2 = "
+(     
+     3
+@((1[<
+     4
+(          
+";
+    let data = r#"
+    /2)@(2\         
+    >)2=2(<         
+    \'(v?)/         
+       s            
+       (            
+       1            
+       >(1=1\       
+       )            
+       1    o       
+       {    *       
+       1    b       
+       (    l       
+       >)u%d/       
+       c            
+       >b'%s(= \    
+     ^ >dc=c*s)/    
+     >=<            
+     d              
+     (              
+/s'0v^?w23(v`s]:(48\
+[   (      )       +
+)   =      =       4
+0   c      c       8
+1   =      =       )
+%   )      (       w
+\01(^      ^)01*01(/"#;
     //let data = "@((123(512/";
     let code = read_string(data);
     println!("{code:?}");

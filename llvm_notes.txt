@@ -1,6 +1,8 @@
 run it with lli from libllvm
 llc can show you source but so can godbolt's explorer
 
+for optimization:
+cat test.ll | clang -O3 -x "ir" -
 
 define i64 @safe_div(i64 %n, i64 %d) {
   %1 = icmp eq i64 %d, 0
