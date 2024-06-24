@@ -1,11 +1,14 @@
+#![allow(dead_code, clippy::needless_raw_string_hashes)]
 use array2d::Array2D;
 use std::collections::HashMap;
-use std::fmt::{self, write, Write};
+use std::fmt::Write;
 
 // TODO:
-// get the numbers in there
-// figure out how to get strings working well, gonna need to make em into static strings
 // implement all of the bf_ functions
+// fix num/string going over edges
+// figure out what to do with inverted write and inverted read
+// implement inverted string (just pop n elements off the stack cuz who needs validating?)
+// automatically pipe the output into `clang -O3 -x "ir" -`
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Direction {
@@ -15,31 +18,16 @@ pub enum Direction {
     West,
 }
 
-impl fmt::Display for Direction {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                Self::North => "N",
-                Self::South => "S",
-                Self::East => "E",
-                Self::West => "W",
-            }
-        )
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Position(usize, usize);
 
 impl Position {
-    fn step(&self, dir: Direction) -> Self {
+    const fn step(&self, dir: Direction) -> Self {
         match dir {
-            Direction::North => Position(self.0, self.1 - 1),
-            Direction::South => Position(self.0, self.1 + 1),
-            Direction::East => Position(self.0 + 1, self.1),
-            Direction::West => Position(self.0 - 1, self.1),
+            Direction::North => Self(self.0, self.1 - 1),
+            Direction::South => Self(self.0, self.1 + 1),
+            Direction::East => Self(self.0 + 1, self.1),
+            Direction::West => Self(self.0 - 1, self.1),
         }
     }
 }
@@ -111,7 +99,7 @@ enum OperatorSymbol {
 
 #[derive(Debug)]
 struct Operator {
-    operator: OperatorSymbol,
+    operation: OperatorSymbol,
     in_direction: Direction,
     inverse: bool,
 }
@@ -130,12 +118,32 @@ struct ExpressionIdentifier {
 }
 
 impl ExpressionIdentifier {
-    fn new(inverse_mode: bool, position: Position, direction: Direction) -> Self {
+    const fn new(inverse_mode: bool, position: Position, direction: Direction) -> Self {
         Self {
             position,
             direction,
             inverse_mode,
         }
+    }
+
+    fn to_codegen_function_name(&self) -> String {
+        let Self {
+            position,
+            direction,
+            inverse_mode,
+        } = *self;
+        format!(
+            "@bf_cg_{}_{}_{}_{}",
+            position.0,
+            position.1,
+            match direction {
+                Direction::North => "N",
+                Direction::South => "S",
+                Direction::East => "E",
+                Direction::West => "W",
+            },
+            if inverse_mode { "inverse" } else { "normal" }
+        )
     }
 }
 
@@ -162,20 +170,20 @@ fn get_char(code: &Array2D<char>, position: Position) -> Option<&char> {
     code.get(position.1, position.0)
 }
 
-// modifies position for reading strings/numbers
+#[allow(clippy::match_same_arms, clippy::too_many_lines)]
 fn parse_operator(
-    position: &mut Position,
+    position: &mut Position, // modifies position for reading strings/numbers
     direction: Direction,
     code: &Array2D<char>,
 ) -> (OperatorSymbol, Directions) {
-    let Some(char) = get_char(&code, *position) else {
+    let Some(char) = get_char(code, *position) else {
         return (OperatorSymbol::Halt, Directions::Halt);
     };
     match char {
         '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' => {
             let mut x = char.to_digit(10).unwrap();
             loop {
-                let next_char = get_char(&code, position.step(direction)).unwrap();
+                let next_char = get_char(code, position.step(direction)).unwrap();
                 if matches!(
                     next_char,
                     '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9'
@@ -193,13 +201,12 @@ fn parse_operator(
         '"' => {
             let mut str = String::new();
             loop {
-                let char = get_char(&code, position.step(direction)).unwrap();
+                let char = get_char(code, position.step(direction)).unwrap();
                 *position = position.step(direction);
-                if *char != '"' {
-                    str.push(*char);
-                } else {
+                if *char == '"' {
                     return (OperatorSymbol::String(str), Directions::Continue(direction));
                 }
+                str.push(*char);
             }
         }
         ' ' => (OperatorSymbol::Blank, Directions::Continue(direction)),
@@ -335,10 +342,10 @@ fn parse_expression(
     let initial_identifier = ExpressionIdentifier::new(inverse_mode, position, direction);
     loop {
         // position is skipped forwards if reading a string/number
-        let (operator, directions) = parse_operator(&mut position, direction, &code);
+        let (operator, directions) = parse_operator(&mut position, direction, code);
 
         expression.push(Operator {
-            operator,
+            operation: operator,
             in_direction: direction,
             inverse: inverse_mode,
         });
@@ -356,7 +363,6 @@ fn parse_expression(
                 continue;
             }
             Directions::Halt => {
-                println!("\nident:{initial_identifier:?}\nbranch: {expression:?}\n");
                 data.tree.insert(
                     initial_identifier,
                     Expression {
@@ -367,7 +373,6 @@ fn parse_expression(
                 return;
             }
             Directions::Branch(dir1, dir2) => {
-                println!("\nident:{initial_identifier:?}\nbranch: {expression:?}\n");
                 let one = ExpressionIdentifier {
                     position: position.step(dir1),
                     direction: dir1,
@@ -378,12 +383,12 @@ fn parse_expression(
                     direction: dir2,
                     inverse_mode,
                 };
-                if !inverse_mode {
+                if inverse_mode {
                     data.tree.insert(
                         initial_identifier,
                         Expression {
                             arr: expression,
-                            next: Branches::Two(one, two),
+                            next: Branches::Two(two, one),
                         },
                     );
                 } else {
@@ -391,7 +396,7 @@ fn parse_expression(
                         initial_identifier,
                         Expression {
                             arr: expression,
-                            next: Branches::Two(two, one),
+                            next: Branches::Two(one, two),
                         },
                     );
                 }
@@ -401,20 +406,14 @@ fn parse_expression(
                     position.step(dir1),
                     dir1,
                 )) {
-                    parse_expression(&code, position.step(dir1), dir1, inverse_mode, data);
-                } else {
-                    println!("match found");
-                    println!("{:?}, {:?}, {}\n", position.step(dir1), dir1, inverse_mode);
+                    parse_expression(code, position.step(dir1), dir1, inverse_mode, data);
                 };
                 if !data.tree.contains_key(&ExpressionIdentifier::new(
                     inverse_mode,
                     position.step(dir2),
                     dir2,
                 )) {
-                    parse_expression(&code, position.step(dir2), dir2, inverse_mode, data);
-                } else {
-                    println!("match found");
-                    println!("{:?}, {:?}, {}\n", position.step(dir2), dir2, inverse_mode);
+                    parse_expression(code, position.step(dir2), dir2, inverse_mode, data);
                 };
                 return;
             }
@@ -437,7 +436,7 @@ fn get_start_pos(code: &Array2D<char>) -> Option<Position> {
 
 fn string_to_i32_arr(str: &str) -> String {
     let mut res = str.chars().fold(String::new(), |mut acc, char| {
-        write!(acc, "{}", format!("i32 {}, ", char as u64)).unwrap();
+        write!(acc, "i32 {}, ", char as u64).unwrap();
         acc
     });
     res.pop();
@@ -466,9 +465,10 @@ fn string_llvm_ir(str: &str, string_name: &str) -> String {
     )
 }
 
+#[allow(clippy::match_same_arms, clippy::too_many_lines)]
 fn operator_to_llvm_ir(str: &mut String, epilogue: &mut String, operator_data: Operator) {
     let Operator {
-        operator,
+        operation: operator,
         inverse,
         in_direction: direction,
     } = operator_data;
@@ -480,7 +480,7 @@ fn operator_to_llvm_ir(str: &mut String, epilogue: &mut String, operator_data: O
 
         // data
         (_, OperatorSymbol::Number(num)) => {
-            tmp = format!("call void @bf_Number(i32 {integer})", integer = num);
+            tmp = format!("call void @bf_Number(i32 {num})");
             &tmp
         }
         (false, OperatorSymbol::String(str)) => {
@@ -499,7 +499,7 @@ fn operator_to_llvm_ir(str: &mut String, epilogue: &mut String, operator_data: O
             tmp = string_llvm_ir(&str, string_name);
             &tmp
         } // stuff between speech marks
-        (true, OperatorSymbol::String(_)) => todo!(),
+        (true, OperatorSymbol::String(_)) => "call void @print_int(i32 40300)\ncall void @unimplemented()",
 
         // stack
         (false, OperatorSymbol::PushZero) => "call void @bf_PushZero()",
@@ -518,10 +518,10 @@ fn operator_to_llvm_ir(str: &mut String, epilogue: &mut String, operator_data: O
 
         // i/o
         (false, OperatorSymbol::Write) => "call void @bf_Write()",
-        (true, OperatorSymbol::Write) => "call void @print_int(i32 40400)",
+        (true, OperatorSymbol::Write) => "call void @print_int(i32 40400)\ncall void @unimplemented()",
 
         (false, OperatorSymbol::Read) => "call void @bf_Read()",
-        (true, OperatorSymbol::Read) => "call void @print_int(i32 40500)",
+        (true, OperatorSymbol::Read) => "call void @print_int(i32 40500)\ncall void @unimplemented()",
 
         // number
         (false, OperatorSymbol::Increment) => "call void @bf_Increment()",
@@ -650,7 +650,7 @@ fn operator_to_llvm_ir(str: &mut String, epilogue: &mut String, operator_data: O
             Direction::West => "call void @push_control_stack(i32 0)",
         },
     };
-    if addition != "" {
+    if !addition.is_empty() {
         str.push_str("\n    ");
         str.push_str(addition);
     }
@@ -659,13 +659,17 @@ fn operator_to_llvm_ir(str: &mut String, epilogue: &mut String, operator_data: O
 const PRELUDE: &str = r#"
 ;; globals
 @int_str = private unnamed_addr constant [4 x i8] c"%d\0A\00", align 1
-@char_str = private unnamed_addr constant [5 x i8] c"-%c-\00", align 1
+@char_str = private unnamed_addr constant [3 x i8] c"%c\00", align 1
 @stack_str = private unnamed_addr constant [8 x i8] c"stack:\0A\00", align 1
 @newline_str = private unnamed_addr constant [3 x i8] c"\0A\0A\00", align 1
 @unimplemented_str = private unnamed_addr constant [15 x i8] c"unimplemented!\00", align 1
 
 declare dso_local i32 @printf(i8*, ...) #1
-declare dso_local void @exit(i32) #2
+;declare dso_local i32 @sleep(i32) #1
+declare dso_local void @exit(i32) #1
+
+declare dso_local i32 @llvm.fshl.i32(i32, i32, i32) #1
+declare dso_local i32 @llvm.fshr.i32(i32, i32, i32) #1
 
 ; offsets point at the most recent value inserted
 ; so must be incremented if you want to add
@@ -872,6 +876,7 @@ define void @bf_Write() {
     call i32 (i8*, ...) @printf(i8* getelementptr inbounds ([3 x i8], [3 x i8]* @char_str, i64 0, i64 0), i32 %1)
     ret void
 }
+
 define void @bf_Read() {
     call void @debug(i32 20)
     call void @unimplemented()
@@ -886,6 +891,7 @@ define void @bf_Increment() {
     call void @push_stack(i32 %2)
     ret void
 }
+
 define void @bf_Decrement() {
     call void @debug(i32 22)
     %1 = call i32 @pop_stack()
@@ -893,6 +899,7 @@ define void @bf_Decrement() {
     call void @push_stack(i32 %2)
     ret void
 }
+
 define void @bf_Add() {
     call void @debug(i32 23)
     %1 = call i32 @pop_stack()
@@ -902,6 +909,7 @@ define void @bf_Add() {
     call void @push_stack(i32 %1)
     ret void
 }
+
 define void @bf_Subtract() {
     call void @debug(i32 23)
     %1 = call i32 @pop_stack()
@@ -911,6 +919,7 @@ define void @bf_Subtract() {
     call void @push_stack(i32 %1)
     ret void
 }
+
 define void @bf_Divide() {
     call void @debug(i32 24)
     %x = call i32 @pop_stack()
@@ -922,6 +931,7 @@ define void @bf_Divide() {
     call void @push_stack(i32 %x)
     ret void
 }
+
 define void @bf_Multiply() {
     call void @debug(i32 25)
     %x = call i32 @pop_stack()
@@ -963,13 +973,21 @@ define void @bf_Xor() {
 
 define void @bf_RotateLeft() {
     call void @debug(i32 30)
-    call void @unimplemented()
+    %x = call i32 @pop_stack()
+    %y = call i32 @pop_stack()
+    %y.1 = call i32 @llvm.fshl.i32(i32 %y, i32 %y, i32 %x)
+    call void @push_stack(i32 %y.1)
+    call void @push_stack(i32 %x)
     ret void
 }
 
 define void @bf_RotateRight() {
     call void @debug(i32 31)
-    call void @unimplemented()
+    %x = call i32 @pop_stack()
+    %y = call i32 @pop_stack()
+    %y.1 = call i32 @llvm.fshr.i32(i32 %y, i32 %y, i32 %x)
+    call void @push_stack(i32 %y.1)
+    call void @push_stack(i32 %x)
     ret void
 }
 
@@ -982,11 +1000,9 @@ define void @bf_ToggleControl() {
 
 define void @bf_EqualityCheck() {
     call void @debug(i32 33)
-    %x = call i32 @pop_control_stack()
-    call void @push_control_stack(i32 %x)
-    %1 = call i32 @peek_stack(i32 0)
-    %2 = call i32 @peek_stack(i32 1)
-    %cond = icmp eq i32 %1, %2
+    %x = call i32 @peek_stack(i32 0)
+    %y = call i32 @peek_stack(i32 1)
+    %cond = icmp eq i32 %y, %x
     br i1 %cond, label %equal, label %not_equal
 equal:
     call void @toggle_control_stack()
@@ -997,13 +1013,27 @@ not_equal:
 
 define void @bf_LessThanCheck() {
     call void @debug(i32 34)
-    call void @unimplemented()
+    %x = call i32 @peek_stack(i32 0)
+    %y = call i32 @peek_stack(i32 1)
+    %cond = icmp slt i32 %y, %x
+    br i1 %cond, label %equal, label %not_equal
+equal:
+    call void @toggle_control_stack()
+    ret void
+not_equal:
     ret void
 }
 
 define void @bf_GreaterThanCheck() {
     call void @debug(i32 35)
-    call void @unimplemented()
+    %x = call i32 @peek_stack(i32 0)
+    %y = call i32 @peek_stack(i32 1)
+    %cond = icmp sgt i32 %y, %x
+    br i1 %cond, label %equal, label %not_equal
+equal:
+    call void @toggle_control_stack()
+    ret void
+not_equal:
     ret void
 }
 
@@ -1016,21 +1046,35 @@ define void @bf_SwapTop() {
     call void @push_stack(i32 %2)
     ret void
 }
+
 define void @bf_Dig() {
     call void @debug(i32 37)
-    call void @unimplemented()
+    %x = call i32 @pop_stack();
+    %y = call i32 @pop_stack();
+    %z = call i32 @pop_stack();
+    call void @push_stack(i32 %y)
+    call void @push_stack(i32 %x)
+    call void @push_stack(i32 %z)
     ret void
 }
+
 define void @bf_Bury() {
     call void @debug(i32 38)
-    call void @unimplemented()
+    %x = call i32 @pop_stack();
+    %y = call i32 @pop_stack();
+    %z = call i32 @pop_stack();
+    call void @push_stack(i32 %x)
+    call void @push_stack(i32 %z)
+    call void @push_stack(i32 %y)
     ret void
 }
+
 define void @bf_Flip() {
     call void @debug(i32 39)
     call void @unimplemented()
     ret void
 }
+
 define void @bf_SwapLower() {
     call void @debug(i32 40)
     %x = call i32 @pop_stack();
@@ -1041,14 +1085,25 @@ define void @bf_SwapLower() {
     call void @push_stack(i32 %x)
     ret void
 }
+
 define void @bf_Over() {
     call void @debug(i32 41)
-    call void @unimplemented()
+    %x = call i32 @pop_stack();
+    %y = call i32 @pop_stack();
+    call void @push_stack(i32 %y)
+    call void @push_stack(i32 %x)
+    call void @push_stack(i32 %y)
     ret void
 }
+
 define void @bf_Under() {
     call void @debug(i32 42)
-    call void @unimplemented()
+    %y.0 = call i32 @pop_stack();
+    %x = call i32 @pop_stack();
+    ; assumes y.1 = y
+    %y.1 = call i32 @pop_stack();
+    call void @push_stack(i32 %y.1)
+    call void @push_stack(i32 %x)
     ret void
 }
 
@@ -1061,11 +1116,13 @@ define void @bf_Duplicate() {
     call void @push_stack(i32 %x)
     ret void
 }
+
 define void @bf_Unduplicate() {
     call void @debug(i32 44)
     call void @pop_stack()
     ret void
 }
+
 define void @bf_Halt() {
     call void @debug(i32 45)
     call void @exit(i32 0)
@@ -1076,26 +1133,14 @@ define void @bf_Halt() {
 
 "#;
 
-fn identifier_to_string(identifier: ExpressionIdentifier) -> String {
-    let ExpressionIdentifier {
-        position,
-        direction,
-        inverse_mode,
-    } = identifier;
-    format!(
-        "@bf_cg_{}_{}_{}_{}",
-        position.0, position.1, direction, inverse_mode
-    )
-}
-
 fn compile(data: ExpressionTree) {
     let mut llvm_ir = String::from(PRELUDE);
-    for (identifier, expression) in data.tree.into_iter() {
+    for (identifier, expression) in data.tree {
         let mut epilogue = String::new();
         write!(
             llvm_ir,
             "define void {}() {{",
-            identifier_to_string(identifier)
+            identifier.to_codegen_function_name()
         )
         .unwrap();
         for operator in expression.arr {
@@ -1104,7 +1149,12 @@ fn compile(data: ExpressionTree) {
         match expression.next {
             Branches::None => llvm_ir.push_str("\n      ret void"),
             Branches::One(id1) => {
-                write!(llvm_ir, "    call void {}()", identifier_to_string(id1)).unwrap();
+                write!(
+                    llvm_ir,
+                    "    call void {}()",
+                    id1.to_codegen_function_name()
+                )
+                .unwrap();
                 llvm_ir.push_str("\n    ret void");
             }
             Branches::Two(id1, id2) => {
@@ -1116,20 +1166,20 @@ fn compile(data: ExpressionTree) {
                 write!(
                     llvm_ir,
                     "branch_1:\n    call void {}()\n    ret void\n",
-                    identifier_to_string(id1)
+                    id1.to_codegen_function_name()
                 )
                 .unwrap();
                 write!(
                     llvm_ir,
                     "branch_0:\n    call void {}()\n    ret void",
-                    identifier_to_string(id2)
+                    id2.to_codegen_function_name()
                 )
                 .unwrap();
             }
         }
         llvm_ir.push_str("\n}\n");
         llvm_ir.push_str(&epilogue);
-        llvm_ir.push_str("\n");
+        llvm_ir.push('\n');
     }
 
     write!(
@@ -1141,7 +1191,7 @@ define void @main() {{
     call void {}()
     ret void
 }}",
-        identifier_to_string(data.start)
+        data.start.to_codegen_function_name()
     )
     .unwrap();
     println!("{llvm_ir}");
@@ -1159,7 +1209,7 @@ fn read_string(data: &str) -> Array2D<char> {
 }
 
 fn parse_code(code: &Array2D<char>) -> ExpressionTree {
-    let start_pos = get_start_pos(&code).unwrap().step(Direction::East);
+    let start_pos = get_start_pos(code).unwrap().step(Direction::East);
     let mut data = ExpressionTree {
         tree: HashMap::new(),
         start: ExpressionIdentifier {
@@ -1168,13 +1218,19 @@ fn parse_code(code: &Array2D<char>) -> ExpressionTree {
             inverse_mode: false,
         },
     };
-    parse_expression(&code, start_pos, Direction::East, false, &mut data);
+    parse_expression(code, start_pos, Direction::East, false, &mut data);
     data
 }
 
-// TODO:
-// fix num/string going over edges
+fn print_tree(tree: &ExpressionTree) {
+    for (identifier, expression) in &tree.tree {
+        println!("\nid: {identifier:?}");
+        println!("expression: {expression:?}");
+    }
+    println!("starts at {:?}", tree.start);
+}
 
+#[allow(unused_variables)]
 fn main() {
     let data = r#"
     /1)@(1\         
@@ -1232,12 +1288,10 @@ fn main() {
 %   )      (       w
 \01(^      ^)01*01(/"#;
     //let data = "@((123(512/";
+
     let code = read_string(data);
-    println!("{code:?}");
+    //println!("{code:?}");
     let tree = parse_code(&code);
-    println!("tree: ");
-    for val in tree.tree.keys() {
-        println!("{val:?}");
-    }
+    //print_tree(&tree);
     compile(tree);
 }
